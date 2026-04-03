@@ -1,6 +1,10 @@
 use std::collections::HashMap;
+use std::fs;
 
+use pyo3::exceptions::PyIOError;
 use pyo3::prelude::*;
+
+const MERGES_RECORD_FILE: &str = "merges_record.json";
 
 fn get_stat(raw_utf8: &[u16]) -> HashMap<(u16, u16), usize> {
     let mut counts: HashMap<(u16, u16), usize> = HashMap::new();
@@ -25,25 +29,58 @@ fn bpe_merge(ids: &[u16], pairs: (u16, u16), idx: u16) -> Vec<u16> {
     return new_ids;
 }
 
+fn save_merges_record(merges_record: &[((u16, u16), u16)]) -> std::io::Result<()> {
+    let mut serialized = String::from("[\n");
+    for (index, ((p0, p1), id)) in merges_record.iter().enumerate() {
+        let separator = if index + 1 == merges_record.len() {
+            ""
+        } else {
+            ","
+        };
+        serialized.push_str(&format!(
+            "  {{\"pair\":[{p0},{p1}],\"id\":{id}}}{separator}\n"
+        ));
+    }
+    serialized.push(']');
+    fs::write(MERGES_RECORD_FILE, serialized)
+}
+
+#[pyfunction(name = "build_info")]
+pub(crate) fn get_build_info() -> String {
+    format!(
+        "ground_llm build: unbounded_encode_train:{}:{}",
+        env!("CARGO_PKG_VERSION"),
+        file!()
+    )
+}
+
 #[pyfunction]
-fn encode_train(s: String) {
+pub(crate) fn encode_train(s: String) -> PyResult<Vec<((u16, u16), u16)>> {
     let s_utf8 = s.into_bytes();
-    let vocab_size: u16 = 276;
-    let num_merges = vocab_size - 256;
     let mut copy_s_utf8: Vec<u16> = s_utf8.into_iter().map(u16::from).collect();
     let mut merges_record: Vec<((u16, u16), u16)> = Vec::new();
-    for i in 0..num_merges {
+    let mut next_idx: u16 = 256;
+    loop {
         let state = get_stat(&copy_s_utf8);
         let Some((&max_pair, _)) = state.iter().max_by_key(|(_, rank)| *rank) else {
             break;
         };
-        let idx = 256 + i;
-        copy_s_utf8 = bpe_merge(&copy_s_utf8, max_pair, idx);
-        merges_record.push((max_pair, idx));
+        copy_s_utf8 = bpe_merge(&copy_s_utf8, max_pair, next_idx);
+        merges_record.push((max_pair, next_idx));
+        let Some(updated_idx) = next_idx.checked_add(1) else {
+            break;
+        };
+        next_idx = updated_idx;
     }
+
+    save_merges_record(&merges_record).map_err(|err| {
+        PyIOError::new_err(format!("failed to write {MERGES_RECORD_FILE}: {err}"))
+    })?;
+
+    Ok(merges_record)
 }
 #[pyfunction]
-fn encode(s: String, merges: Vec<((u16, u16), u16)>) -> Vec<u16> {
+pub(crate) fn encode(s: String, merges: Vec<((u16, u16), u16)>) -> Vec<u16> {
     let s_utf8 = s.into_bytes();
     let mut copy_s_utf8: Vec<u16> = s_utf8.into_iter().map(u16::from).collect();
     for ((p0, p1), id) in merges {
@@ -53,7 +90,7 @@ fn encode(s: String, merges: Vec<((u16, u16), u16)>) -> Vec<u16> {
 }
 
 #[pyfunction]
-fn decode_string(ids: Vec<u16>, merges: Vec<((u16, u16), u16)>) -> String {
+pub(crate) fn decode_string(ids: Vec<u16>, merges: Vec<((u16, u16), u16)>) -> String {
     let mut vocab_list: HashMap<u16, Vec<u8>> = HashMap::new();
     for idx in 0..256 {
         vocab_list.insert(idx, vec![idx as u8]);
