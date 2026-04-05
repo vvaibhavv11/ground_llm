@@ -6,10 +6,12 @@ use pyo3::prelude::*;
 
 const MERGES_RECORD_FILE: &str = "merges_record.json";
 
-fn get_stat(raw_utf8: &[u16]) -> HashMap<(u16, u16), usize> {
+fn get_stat(raw_utf8: &Vec<Vec<u16>>) -> HashMap<(u16, u16), usize> {
     let mut counts: HashMap<(u16, u16), usize> = HashMap::new();
-    for pairs in raw_utf8.windows(2) {
-        *counts.entry((pairs[0], pairs[1])).or_insert(0) += 1;
+    for chunk in raw_utf8 {
+        for pairs in chunk.windows(2) {
+            *counts.entry((pairs[0], pairs[1])).or_insert(0) += 1;
+        }
     }
     return counts;
 }
@@ -55,17 +57,24 @@ pub(crate) fn get_build_info() -> String {
 }
 
 #[pyfunction]
-pub(crate) fn encode_train(s: String) -> PyResult<Vec<((u16, u16), u16)>> {
-    let s_utf8 = s.into_bytes();
-    let mut copy_s_utf8: Vec<u16> = s_utf8.into_iter().map(u16::from).collect();
+pub(crate) fn encode_train(chunks: Vec<String>) -> PyResult<Vec<((u16, u16), u16)>> {
+    let mut data: Vec<Vec<u16>> = chunks
+        .into_iter()
+        .map(|chunk| chunk.into_bytes().into_iter().map(u16::from).collect())
+        .collect();
     let mut merges_record: Vec<((u16, u16), u16)> = Vec::new();
     let mut next_idx: u16 = 256;
     loop {
-        let state = get_stat(&copy_s_utf8);
-        let Some((&max_pair, _)) = state.iter().max_by_key(|(_, rank)| *rank) else {
+        let state = get_stat(&data);
+        let Some((&max_pair, &freq)) = state.iter().max_by_key(|(_, rank)| *rank) else {
             break;
         };
-        copy_s_utf8 = bpe_merge(&copy_s_utf8, max_pair, next_idx);
+        if freq < 3 {
+            break;
+        }
+        for chunk in data.iter_mut() {
+            *chunk = bpe_merge(chunk, max_pair, next_idx);
+        }
         merges_record.push((max_pair, next_idx));
         let Some(updated_idx) = next_idx.checked_add(1) else {
             break;
