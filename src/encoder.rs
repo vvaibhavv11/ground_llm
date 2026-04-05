@@ -89,13 +89,18 @@ pub(crate) fn encode_train(chunks: Vec<String>) -> PyResult<Vec<((u16, u16), u16
     Ok(merges_record)
 }
 #[pyfunction]
-pub(crate) fn encode(s: String, merges: Vec<((u16, u16), u16)>) -> Vec<u16> {
-    let s_utf8 = s.into_bytes();
-    let mut copy_s_utf8: Vec<u16> = s_utf8.into_iter().map(u16::from).collect();
+pub(crate) fn encode(s: Vec<String>, merges: Vec<((u16, u16), u16)>) -> Vec<u16> {
+    let s_utf8: Vec<Vec<u16>> = s
+        .into_iter()
+        .map(|chunk| chunk.into_bytes().into_iter().map(u16::from).collect())
+        .collect();
+    let mut final_utf8: Vec<u16> = Vec::new();
     for ((p0, p1), id) in merges {
-        copy_s_utf8 = bpe_merge(&copy_s_utf8, (p0, p1), id);
+        for chunk in &s_utf8 {
+            final_utf8.extend(bpe_merge(&chunk, (p0, p1), id));
+        }
     }
-    return copy_s_utf8;
+    return final_utf8;
 }
 
 #[pyfunction]
