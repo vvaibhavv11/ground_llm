@@ -12,6 +12,14 @@ classifiers = [
 ]
 dynamic = ["version"]
 
+[dependency-groups]
+dev = [
+    "maturin>=1.12,<2.0",
+]
+
+[tool.maturin]
+bindings = "pyo3"
+
 [tool.uv]
 cache-keys = [
     { file = "pyproject.toml" },
