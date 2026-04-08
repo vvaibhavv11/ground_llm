@@ -3,6 +3,7 @@ use std::fs;
 
 use pyo3::exceptions::PyIOError;
 use pyo3::prelude::*;
+use rayon::prelude::*;
 
 const MERGES_RECORD_FILE: &str = "merges_record.json";
 const VOCAB_LIST_FILE: &str = "vocab_list.json";
@@ -11,14 +12,22 @@ const MAX_MERGES: usize = 50_000;
 type Merge = ((u16, u16), u16);
 type VocabList = HashMap<u16, Vec<u8>>;
 
-fn get_stat(raw_utf8: &Vec<Vec<u16>>) -> HashMap<(u16, u16), usize> {
-    let mut counts: HashMap<(u16, u16), usize> = HashMap::new();
-    for chunk in raw_utf8 {
-        for pairs in chunk.windows(2) {
-            *counts.entry((pairs[0], pairs[1])).or_insert(0) += 1;
-        }
-    }
-    return counts;
+fn get_stat(raw_utf8: &[Vec<u16>]) -> HashMap<(u16, u16), usize> {
+    raw_utf8
+        .par_iter()
+        .map(|chunk| {
+            let mut counts: HashMap<(u16, u16), usize> = HashMap::new();
+            for pairs in chunk.windows(2) {
+                *counts.entry((pairs[0], pairs[1])).or_insert(0) += 1;
+            }
+            counts
+        })
+        .reduce(HashMap::new, |mut aggregate, counts| {
+            for (pair, count) in counts {
+                *aggregate.entry(pair).or_insert(0) += count;
+            }
+            aggregate
+        })
 }
 
 fn bpe_merge(ids: &[u16], pairs: (u16, u16), idx: u16) -> Vec<u16> {
@@ -103,6 +112,10 @@ pub(crate) fn encode_train(chunks: Vec<String>) -> PyResult<Vec<Merge>> {
         .into_iter()
         .map(|chunk| chunk.into_bytes().into_iter().map(u16::from).collect())
         .collect();
+    let mut counts: HashMap<Vec<u16>, usize> = HashMap::new();
+    for word in data {
+        *counts.entry(word).or_insert(0) += 1;
+    }
     let mut merges_record: Vec<Merge> = Vec::new();
     let mut next_idx: u16 = 256;
     loop {
@@ -121,9 +134,10 @@ pub(crate) fn encode_train(chunks: Vec<String>) -> PyResult<Vec<Merge>> {
 
         println!("next_idx={next_idx}");
 
-        for chunk in data.iter_mut() {
-            *chunk = bpe_merge(chunk, max_pair, next_idx);
-        }
+        data = data
+            .into_par_iter()
+            .map(|chunk| bpe_merge(&chunk, max_pair, next_idx))
+            .collect();
         merges_record.push((max_pair, next_idx));
         let Some(updated_idx) = next_idx.checked_add(1) else {
             break;
