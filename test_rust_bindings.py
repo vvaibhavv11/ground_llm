@@ -20,7 +20,7 @@ EXPECTED_EXPORTS = (
     "decode_string",
     "save_vocab_list",
 )
-# directly taken from the tiktoken library by openai
+# directly taken from the tiktoken library by openai https://github.com/openai/tiktoken but the tiktoken does not contain the training code
 pat_str = "|".join(
     [
         r"""[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*[\p{Ll}\p{Lm}\p{Lo}\p{M}]+(?i:'s|'t|'re|'ve|'m|'ll|'d)?""",

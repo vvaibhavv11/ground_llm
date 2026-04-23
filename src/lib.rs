@@ -2,6 +2,8 @@ use pyo3::prelude::*;
 use pyo3::wrap_pyfunction;
 
 mod encoder;
+mod matrix;
+mod train;
 
 /// A Python module implemented in Rust.
 #[pymodule]
