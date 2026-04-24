@@ -1,3 +1,4 @@
+use rand::prelude::*;
 use std::fmt;
 
 const EXPO: f32 = 2.71828;
@@ -14,6 +15,18 @@ impl Matrix {
             rows,
             cols,
             data: vec![0.0; rows * cols],
+        }
+    }
+
+    pub fn random(rows: usize, cols: usize) -> Matrix {
+        let mut rng = rand::rng();
+        let values: Vec<f32> = (0..rows * cols)
+            .map(|_| rng.random_range(-1.0..1.0))
+            .collect();
+        Self {
+            rows,
+            cols,
+            data: values,
         }
     }
 
@@ -40,6 +53,23 @@ impl Matrix {
             }
         }
         return Matrix::with_vector(self.cols, self.rows, new_data);
+    }
+
+    pub fn rms_norm(&mut self) {
+        let epsilon = 1e-5;
+        for row in 0..self.rows {
+            let start = row * self.cols;
+            let end = start + self.cols;
+
+            let slice = &mut self.data[start..end];
+
+            let sq_sum: f32 = slice.iter().map(|x| x * x).sum();
+            let rms = (sq_sum / self.cols as f32 + epsilon).sqrt();
+
+            for x in slice.iter_mut() {
+                *x /= rms;
+            }
+        }
     }
 
     pub fn set_value(&mut self, row: usize, col: usize, value: f32) {
@@ -127,12 +157,31 @@ impl Matrix {
             Matrix::with_vector(self.rows, d, v),
         )
     }
-}
 
-pub fn soft_max(m: &Matrix) -> Matrix {
-    let sum_vector: f32 = m.data.iter().map(|x| EXPO.powf(*x)).sum();
-    let softmax_vector = m.data.iter().map(|x| EXPO.powf(*x) / sum_vector).collect();
-    Matrix::with_vector(m.rows, m.cols, softmax_vector)
+    pub fn rope(&mut self) {
+        let dim = self.cols as f32;
+
+        for pos in 0..self.rows {
+            let row_start = pos * self.cols;
+
+            let mut i = 0;
+            while i + 1 < self.cols {
+                let idx = row_start + i;
+
+                let x = self.data[idx];
+                let y = self.data[idx + 1];
+
+                let theta = (pos as f32) / 10000_f32.powf((i as f32) / dim);
+                let cos = theta.cos();
+                let sin = theta.sin();
+
+                self.data[idx] = x * cos - y * sin;
+                self.data[idx + 1] = x * sin + y * cos;
+
+                i += 2;
+            }
+        }
+    }
 }
 
 pub fn softmax(m: &Matrix) -> Matrix {
@@ -176,6 +225,20 @@ pub fn get_head(q: &Matrix, head: usize, head_dim: usize) -> Matrix {
         cols: head_dim,
         data,
     }
+}
+
+pub fn concat_heads(v_m: Vec<Matrix>) -> Matrix {
+    let rows = v_m[0].rows;
+    let cols = v_m[0].cols * v_m.len();
+    let mut data = Vec::with_capacity(rows * cols);
+    for row in 0..rows {
+        for m in v_m.iter() {
+            let start = row * m.cols;
+            let end = start + m.cols;
+            data.extend_from_slice(&m.data[start..end]);
+        }
+    }
+    Matrix::with_vector(rows, cols, data)
 }
 
 impl fmt::Display for Matrix {
