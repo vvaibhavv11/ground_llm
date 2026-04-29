@@ -94,6 +94,14 @@ impl Matrix {
         Matrix::with_vector(self.rows, self.cols, data)
     }
 
+    pub fn elem_mul(&mut self, m: &Matrix) {
+        assert_eq!(self.data.len(), m.data.len());
+
+        for (a, b) in self.data.iter_mut().zip(m.data.iter()) {
+            *a *= *b;
+        }
+    }
+
     pub fn dv_scalar(&self, dv: f32) -> Matrix {
         let data = self.data.iter().map(|x| x / dv).collect();
         Matrix::with_vector(self.rows, self.cols, data)
@@ -130,10 +138,11 @@ impl Matrix {
         return Matrix::with_vector(self.rows, b_transpose.rows, data);
     }
 
-    pub fn relu(&self) -> Matrix {
-        let data = self.data.iter().map(|x| x.max(0.0)).collect();
-
-        Matrix::with_vector(self.rows, self.cols, data)
+    pub fn swish(&mut self) {
+        for x in &mut self.data {
+            let e = (-*x).exp();
+            *x = *x / (1.0 + e);
+        }
     }
 
     pub fn split_qkv(&self) -> (Matrix, Matrix, Matrix) {

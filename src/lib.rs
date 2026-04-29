@@ -3,6 +3,7 @@ use pyo3::wrap_pyfunction;
 
 mod encoder;
 mod matrix;
+mod mlp;
 mod train;
 
 /// A Python module implemented in Rust.
