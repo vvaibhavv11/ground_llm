@@ -56,4 +56,15 @@ fn train_model(data: Vec<u16>) {
     let lm_head = Matrix::random(DIMENSIONS, VOCAB_SIZE);
     let logits = x.mul_transpose(&lm_head.transpose());
     let logits_softmax = softmax(&logits);
+    let mut loss = 0.0;
+
+    for i in 0..data.len() - 1 {
+        let target = data[i + 1] as usize;
+
+        let prob = logits_softmax.get_value(i, target).max(1e-9);
+
+        loss += -prob.ln();
+    }
+
+    loss /= (data.len() - 1) as f32;
 }
