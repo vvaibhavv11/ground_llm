@@ -45,6 +45,12 @@ impl Matrix {
         self.data[row * self.cols + col]
     }
 
+    pub fn get_row(&self, row: usize) -> Vec<f32> {
+        let start = row * self.cols;
+        let end = start + self.cols;
+        self.data[start..end].to_vec()
+    }
+
     pub fn transpose(&self) -> Matrix {
         let mut new_data = Vec::with_capacity(self.rows * self.cols);
         for i in 0..self.cols {
@@ -55,13 +61,14 @@ impl Matrix {
         return Matrix::with_vector(self.cols, self.rows, new_data);
     }
 
-    pub fn rms_norm(&mut self) {
+    pub fn rms_norm(&self) -> Matrix {
         let epsilon = 1e-5;
+        let mut new_data = self.data.clone();
         for row in 0..self.rows {
             let start = row * self.cols;
             let end = start + self.cols;
 
-            let slice = &mut self.data[start..end];
+            let slice = &mut new_data[start..end];
 
             let sq_sum: f32 = slice.iter().map(|x| x * x).sum();
             let rms = (sq_sum / self.cols as f32 + epsilon).sqrt();
@@ -70,6 +77,7 @@ impl Matrix {
                 *x /= rms;
             }
         }
+        Matrix::with_vector(self.rows, self.cols, new_data)
     }
 
     pub fn set_value(&mut self, row: usize, col: usize, value: f32) {
@@ -138,7 +146,22 @@ impl Matrix {
         return Matrix::with_vector(self.rows, b_transpose.rows, data);
     }
 
+    pub fn causal_mask(&mut self) {
+        for row in 0..self.rows {
+            for col in (row + 1)..self.cols {
+                self.data[row * self.cols + col] = f32::NEG_INFINITY;
+            }
+        }
+    }
+
     pub fn swish(&mut self) {
+        for x in &mut self.data {
+            let e = (-*x).exp();
+            *x = *x / (1.0 + e);
+        }
+    }
+
+    pub fn swish_derivation(&mut self) {
         for x in &mut self.data {
             let e = (-*x).exp();
             *x = *x / (1.0 + e);
