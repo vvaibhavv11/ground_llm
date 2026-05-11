@@ -221,23 +221,29 @@ impl Matrix {
     // Strassen's Matrix Multiplication (parallel)
     // =========================================================================
 
-    /// Strassen's algorithm for matrix multiplication.
-    /// Uses parallel thread pool for large matrices.
-    /// Falls back to naive multiplication for small matrices.
-    pub fn mul_strassen(&self, b: &Matrix) -> Matrix {
-        assert!(self.cols == b.rows, "dimension mismatch");
-        assert!(
-            self.rows == self.cols && b.rows == b.cols,
-            "Strassen requires square matrices (padding not implemented)"
-        );
+/// Strassen's algorithm for matrix multiplication.
+/// Uses parallel thread pool for large matrices.
+/// Falls back to naive multiplication for small matrices.
+pub fn mul_strassen(&self, b: &Matrix) -> Matrix {
+    // ---- Validation checks ----
+    assert!(self.cols == b.rows, "dimension mismatch: ({}, {}) @ ({}, {})",
+        self.rows, self.cols, b.rows, b.cols);
+    assert!(self.rows == self.cols, "matrix A is not square: {}x{}", self.rows, self.cols);
+    assert!(b.rows == b.cols, "matrix B is not square: {}x{}", b.rows, b.cols);
 
-        let n = self.rows;
-        let num_threads = std::thread::available_parallelism()
-            .map(|p| p.get())
-            .unwrap_or(4);
+    let n = self.rows;
 
-        self.strassen_recursive(b, num_threads)
+    // Fall back to naive for small matrices (overhead not worth it)
+    if n <= 64 {
+        return self.mul(b);
     }
+
+    let num_threads = std::thread::available_parallelism()
+        .map(|p| p.get())
+        .unwrap_or(4);
+
+    self.strassen_recursive(b, num_threads)
+}
 
     fn strassen_recursive(&self, b: &Matrix, num_threads: usize) -> Matrix {
         let n = self.rows;
@@ -515,10 +521,18 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Strassen requires square matrices")]
+    #[should_panic(expected = "matrix A is not square")]
     fn test_strassen_requires_square() {
         let a = Matrix::random(4, 8);
-        let b = Matrix::random(8, 4);
+        let b = Matrix::random(8, 8);
+        let _ = a.mul_strassen(&b);
+    }
+
+    #[test]
+    #[should_panic(expected = "dimension mismatch")]
+    fn test_strassen_dimension_mismatch() {
+        let a = Matrix::random(4, 4);
+        let b = Matrix::random(8, 8);
         let _ = a.mul_strassen(&b);
     }
 }
