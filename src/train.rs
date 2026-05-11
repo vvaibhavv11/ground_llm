@@ -348,12 +348,13 @@ mod tests {
     #[test]
     fn test_transformer_forward() {
         let config = Config::default();
+        let vocab_size = config.vocab_size;
         let mut transformer = Transformer::new(config);
 
         let tokens = vec![1u16, 2, 3, 4, 5];
         let probs = transformer.forward(&tokens);
 
         assert_eq!(probs.rows, 5);
-        assert_eq!(probs.cols, config.vocab_size);
+        assert_eq!(probs.cols, vocab_size);
     }
 }
