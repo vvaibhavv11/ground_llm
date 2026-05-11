@@ -3,6 +3,7 @@ use std::fmt;
 
 const EXPO: f32 = 2.71828;
 
+#[derive(Clone)]
 pub struct Matrix {
     pub rows: usize,
     pub cols: usize,
