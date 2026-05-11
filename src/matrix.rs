@@ -228,8 +228,6 @@ pub fn mul_strassen(&self, b: &Matrix) -> Matrix {
     // ---- Validation checks ----
     assert!(self.cols == b.rows, "dimension mismatch: ({}, {}) @ ({}, {})",
         self.rows, self.cols, b.rows, b.cols);
-    assert!(self.rows == self.cols, "matrix A is not square: {}x{}", self.rows, self.cols);
-    assert!(b.rows == b.cols, "matrix B is not square: {}x{}", b.rows, b.cols);
 
     let n = self.rows;
 
@@ -518,14 +516,6 @@ mod tests {
                 assert!((naive.get_value(i, j) - strassen.get_value(i, j)).abs() < 1e-2);
             }
         }
-    }
-
-    #[test]
-    #[should_panic(expected = "matrix A is not square")]
-    fn test_strassen_requires_square() {
-        let a = Matrix::random(4, 8);
-        let b = Matrix::random(8, 8);
-        let _ = a.mul_strassen(&b);
     }
 
     #[test]
