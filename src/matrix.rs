@@ -1,8 +1,10 @@
 use rand::prelude::*;
+use rayon::prelude::*;
 use std::fmt;
 
 const EXPO: f32 = 2.71828;
 
+#[derive(Clone)]
 pub struct Matrix {
     pub rows: usize,
     pub cols: usize,
@@ -290,4 +292,10 @@ impl fmt::Display for Matrix {
             array_string
         )
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
 }
