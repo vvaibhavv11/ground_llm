@@ -1,70 +1,360 @@
-use std::thread;
-
-use crate::{
-    matrix::{concat_heads, get_head, softmax, Matrix},
-    mlp::Mlp,
-};
 use rand::prelude::*;
 
-const DIMENSIONS: usize = 512;
-const NHEAD: usize = 8;
-const VOCAB_SIZE: usize = 50256;
-const HEAD_DIMENSIONS: usize = 64;
+use crate::matrix::{concat_heads, get_head, softmax, Matrix};
+use crate::mlp::{Mlp, MlpCache};
 
-fn train_model(data: Vec<u16>) {
-    let embedding = Matrix::random(VOCAB_SIZE, DIMENSIONS);
-    let mut rng = rand::rng();
-    let mut x_data = vec![];
+// ============================================================================
+// Config
+// ============================================================================
 
-    for token in &data {
-        x_data.extend(embedding.get_row(*token as usize));
+#[derive(Clone, Debug)]
+pub struct Config {
+    pub dimensions: usize,
+    pub n_heads: usize,
+    pub vocab_size: usize,
+    pub head_dim: usize,
+    pub mlp_hidden: usize,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            dimensions: 512,
+            n_heads: 8,
+            vocab_size: 50256,
+            head_dim: 64,
+            mlp_hidden: 1380,
+        }
+    }
+}
+
+impl Config {
+    pub fn qkv_size(&self) -> usize {
+        self.dimensions * 3
+    }
+}
+
+// ============================================================================
+// Embedding
+// ============================================================================
+
+#[derive(Clone)]
+pub struct Embedding {
+    pub table: Matrix, // [vocab_size, dimensions]
+}
+
+impl Embedding {
+    pub fn new(vocab_size: usize, dimensions: usize) -> Self {
+        Self {
+            table: Matrix::random(vocab_size, dimensions),
+        }
     }
 
-    let mut x = Matrix::with_vector(data.len(), DIMENSIONS, x_data);
+    /// Look up embeddings for a sequence of tokens.
+    /// Input: tokens of length [seq_len]
+    /// Output: matrix of shape [seq_len, dimensions]
+    pub fn forward(&self, tokens: &[u16]) -> Matrix {
+        let seq_len = tokens.len();
+        let mut data = Vec::with_capacity(seq_len * self.table.cols);
 
-    let norm_x = x.rms_norm();
+        for &token in tokens {
+            data.extend(self.table.get_row(token as usize));
+        }
 
-    let _w_qkv: Vec<f32> = (0..DIMENSIONS * 3 * DIMENSIONS)
-        .map(|_| rng.random_range(-1.0..1.0))
-        .collect();
-
-    let w_qkv = Matrix::with_vector(DIMENSIONS, 3 * DIMENSIONS, _w_qkv);
-    let qkv = norm_x.mul_transpose(&w_qkv.transpose());
-    let (q, k, v) = qkv.split_qkv();
-    let mut heads_output: Vec<Matrix> = vec![];
-    for head in 0..NHEAD {
-        let mut q_head = get_head(&q, head, HEAD_DIMENSIONS);
-        let mut k_head = get_head(&k, head, HEAD_DIMENSIONS);
-        let v_head = get_head(&v, head, HEAD_DIMENSIONS);
-        q_head.rope();
-        k_head.rope();
-        let qk = q_head.mul_transpose(&k_head);
-        let mut dev_answer = qk.dv_scalar((HEAD_DIMENSIONS as f32).sqrt());
-        dev_answer.causal_mask();
-        let final_marix = softmax(&dev_answer);
-        let attention = final_marix.mul_transpose(&v_head.transpose());
-        heads_output.push(attention);
+        Matrix::with_vector(seq_len, self.table.cols, data)
     }
-    let concat = concat_heads(heads_output);
-    let w_o = Matrix::random(DIMENSIONS, DIMENSIONS);
-    let attn_out = concat.mul_transpose(&w_o.transpose());
-    x = x.add(&attn_out);
-    let norm_x2 = x.rms_norm();
-    let mut ffn = Mlp::new(x.rows, DIMENSIONS);
-    let ffn_result = ffn.feedforward(norm_x2);
-    x = x.add(&ffn_result);
-    let lm_head = Matrix::random(DIMENSIONS, VOCAB_SIZE);
-    let logits = x.mul_transpose(&lm_head.transpose());
-    let logits_softmax = softmax(&logits);
-    let mut loss = 0.0;
+}
 
-    for i in 0..data.len() - 1 {
-        let target = data[i + 1] as usize;
+// ============================================================================
+// Attention
+// ============================================================================
 
-        let prob = logits_softmax.get_value(i, target).max(1e-9);
+#[derive(Clone)]
+pub struct Attention {
+    pub config: Config,
+    pub w_qkv: Matrix, // [dimensions, dimensions * 3]
+    pub w_o: Matrix,   // [dimensions, dimensions]
 
-        loss += -prob.ln();
+    // Cache for backward pass
+    pub cache: Option<AttentionCache>,
+}
+
+#[derive(Clone, Default)]
+pub struct AttentionCache {
+    pub qkv: Option<Matrix>,
+    pub q: Option<Matrix>,
+    pub k: Option<Matrix>,
+    pub v: Option<Matrix>,
+    pub q_heads: Vec<Matrix>,
+    pub k_heads: Vec<Matrix>,
+    pub v_heads: Vec<Matrix>,
+    pub attention_heads: Vec<Matrix>,
+    pub concat: Option<Matrix>,
+    pub output: Option<Matrix>,
+}
+
+impl Attention {
+    pub fn new(config: &Config) -> Self {
+        Self {
+            config: config.clone(),
+            w_qkv: Matrix::random(config.dimensions, config.qkv_size()),
+            w_o: Matrix::random(config.dimensions, config.dimensions),
+            cache: None,
+        }
     }
 
-    loss /= (data.len() - 1) as f32;
+    /// Forward pass through attention layer.
+    /// Input: x [seq_len, dimensions]
+    /// Output: attention output [seq_len, dimensions]
+    pub fn forward(&mut self, x: &Matrix) -> Matrix {
+        let config = &self.config;
+
+        // ---- QKV projection ----
+        let qkv = x.mul_transpose(&self.w_qkv.transpose());
+        let (q, k, v) = qkv.split_qkv();
+
+        // ---- Multi-head attention ----
+        let mut attention_heads: Vec<Matrix> = Vec::with_capacity(config.n_heads);
+        let mut q_heads: Vec<Matrix> = Vec::with_capacity(config.n_heads);
+        let mut k_heads: Vec<Matrix> = Vec::with_capacity(config.n_heads);
+        let mut v_heads_cache: Vec<Matrix> = Vec::with_capacity(config.n_heads);
+
+        for head in 0..config.n_heads {
+            // Extract head
+            let mut q_head = get_head(&q, head, config.head_dim);
+            let mut k_head = get_head(&k, head, config.head_dim);
+            let v_head = get_head(&v, head, config.head_dim);
+
+            // ---- RoPE (Rotary Position Embedding) ----
+            q_head.rope();
+            k_head.rope();
+
+            // ---- Attention scores ----
+            let qk = q_head.mul_transpose(&k_head);
+            let qk_scaled = qk.dv_scalar((config.head_dim as f32).sqrt());
+
+            let mut qk_masked = qk_scaled;
+            qk_masked.causal_mask();
+
+            let attn_weights = softmax(&qk_masked);
+            let attention = attn_weights.mul_transpose(&v_head.transpose());
+
+            q_heads.push(q_head);
+            k_heads.push(k_head);
+            v_heads_cache.push(v_head);
+            attention_heads.push(attention);
+        }
+
+        // ---- Concat heads and project ----
+        let concat = concat_heads(attention_heads);
+        let output = concat.mul_transpose(&self.w_o.transpose());
+
+        // Store cache for backward pass
+        self.cache = Some(AttentionCache {
+            qkv: Some(qkv),
+            q: Some(q),
+            k: Some(k),
+            v: Some(v),
+            q_heads,
+            k_heads,
+            v_heads: v_heads_cache,
+            attention_heads: Vec::new(),
+            concat: Some(concat),
+            output: Some(output.clone()),
+        });
+
+        output
+    }
+
+    pub fn clear_cache(&mut self) {
+        self.cache = None;
+    }
+}
+
+// ============================================================================
+// Transformer Block
+// ============================================================================
+
+#[derive(Clone)]
+pub struct TransformerBlock {
+    pub config: Config,
+    pub attention: Attention,
+    pub mlp: Mlp,
+}
+
+impl TransformerBlock {
+    pub fn new(config: &Config) -> Self {
+        Self {
+            config: config.clone(),
+            attention: Attention::new(config),
+            mlp: Mlp::new(config.dimensions, config.mlp_hidden),
+        }
+    }
+
+    /// Forward pass through transformer block.
+    /// Input: x [seq_len, dimensions]
+    /// Output: [seq_len, dimensions]
+    pub fn forward(&mut self, x: &Matrix) -> Matrix {
+        // ---- Self-attention with residual ----
+        let attn_out = self.attention.forward(x);
+        let x = x.add(&attn_out);
+
+        // ---- MLP with residual ----
+        let norm_x = x.rms_norm();
+        let mlp_out = self.mlp.forward(norm_x);
+        x.add(&mlp_out)
+    }
+}
+
+// ============================================================================
+// Language Model Head
+// ============================================================================
+
+#[derive(Clone)]
+pub struct LanguageModelHead {
+    pub weights: Matrix, // [dimensions, vocab_size]
+
+    pub cache: Option<LmHeadCache>,
+}
+
+#[derive(Clone, Default)]
+pub struct LmHeadCache {
+    pub input: Option<Matrix>,
+    pub logits: Option<Matrix>,
+    pub probs: Option<Matrix>,
+}
+
+impl LanguageModelHead {
+    pub fn new(dimensions: usize, vocab_size: usize) -> Self {
+        Self {
+            weights: Matrix::random(dimensions, vocab_size),
+            cache: None,
+        }
+    }
+
+    /// Project to vocabulary logits.
+    /// Input: x [seq_len, dimensions]
+    /// Output: logits [seq_len, vocab_size]
+    pub fn forward(&mut self, x: &Matrix) -> Matrix {
+        let logits = x.mul_transpose(&self.weights.transpose());
+        let probs = softmax(&logits);
+
+        self.cache = Some(LmHeadCache {
+            input: Some(x.clone()),
+            logits: Some(logits.clone()),
+            probs: Some(probs.clone()),
+        });
+
+        probs
+    }
+
+    pub fn clear_cache(&mut self) {
+        self.cache = None;
+    }
+}
+
+// ============================================================================
+// Transformer (Full Model)
+// ============================================================================
+
+#[derive(Clone)]
+pub struct Transformer {
+    pub config: Config,
+    pub embedding: Embedding,
+    pub block: TransformerBlock,
+    pub lm_head: LanguageModelHead,
+}
+
+impl Transformer {
+    pub fn new(config: Config) -> Self {
+        Self {
+            config: config.clone(),
+            embedding: Embedding::new(config.vocab_size, config.dimensions),
+            block: TransformerBlock::new(&config),
+            lm_head: LanguageModelHead::new(config.dimensions, config.vocab_size),
+        }
+    }
+
+    /// Full forward pass.
+    /// Input: token IDs [seq_len]
+    /// Output: vocabulary probabilities [seq_len, vocab_size]
+    pub fn forward(&mut self, tokens: &[u16]) -> Matrix {
+        // 1. Embedding lookup
+        let x = self.embedding.forward(tokens);
+
+        // 2. RMSNorm before attention
+        let x = x.rms_norm();
+
+        // 3. Transformer block (attention + MLP)
+        let x = self.block.forward(&x);
+
+        // 4. Final RMSNorm
+        let x = x.rms_norm();
+
+        // 5. Language model head (projection to vocab)
+        self.lm_head.forward(&x)
+    }
+
+    pub fn clear_caches(&mut self) {
+        self.block.attention.clear_cache();
+        self.block.mlp.clear_cache();
+        self.lm_head.clear_cache();
+    }
+}
+
+// ============================================================================
+// Training Entry Point
+// ============================================================================
+
+pub fn train_model(data: Vec<u16>) {
+    let config = Config::default();
+    let mut transformer = Transformer::new(config);
+
+    // ---- Forward pass ----
+    let _probs = transformer.forward(&data);
+
+    // Probs now contains softmax probabilities over vocabulary
+    // Next step: implement backward pass to compute gradients
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_embedding_lookup() {
+        let embedding = Embedding::new(100, 64);
+        let tokens = vec![1u16, 2, 3];
+        let out = embedding.forward(&tokens);
+
+        assert_eq!(out.rows, 3);
+        assert_eq!(out.cols, 64);
+    }
+
+    #[test]
+    fn test_attention_shape() {
+        let config = Config::default();
+        let x = Matrix::random(5, config.dimensions);
+
+        let w_qkv = Matrix::random(config.dimensions, config.qkv_size());
+        let qkv = x.mul_transpose(&w_qkv.transpose());
+        let (q, k, v) = qkv.split_qkv();
+
+        assert_eq!(q.cols, config.dimensions);
+        assert_eq!(k.cols, config.dimensions);
+        assert_eq!(v.cols, config.dimensions);
+    }
+
+    #[test]
+    fn test_transformer_forward() {
+        let config = Config::default();
+        let vocab_size = config.vocab_size;
+        let mut transformer = Transformer::new(config);
+
+        let tokens = vec![1u16, 2, 3, 4, 5];
+        let probs = transformer.forward(&tokens);
+
+        assert_eq!(probs.rows, 5);
+        assert_eq!(probs.cols, vocab_size);
+    }
 }
