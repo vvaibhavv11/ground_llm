@@ -180,6 +180,18 @@ pub struct TransformerBlock {
     pub config: Config,
     pub attention: Attention,
     pub mlp: Mlp,
+
+    // Cache for backward pass
+    pub cache: Option<TransformerBlockCache>,
+}
+
+#[derive(Clone, Default)]
+pub struct TransformerBlockCache {
+    pub attn_out: Option<Matrix>,
+    pub x_after_attn: Option<Matrix>,
+    pub norm_x: Option<Matrix>,
+    pub mlp_out: Option<Matrix>,
+    pub output: Option<Matrix>,
 }
 
 impl TransformerBlock {
@@ -188,6 +200,7 @@ impl TransformerBlock {
             config: config.clone(),
             attention: Attention::new(config),
             mlp: Mlp::new(config.dimensions, config.mlp_hidden),
+            cache: None,
         }
     }
 
@@ -201,8 +214,22 @@ impl TransformerBlock {
 
         // ---- MLP with residual ----
         let norm_x = x.rms_norm();
-        let mlp_out = self.mlp.forward(norm_x);
-        x.add(&mlp_out)
+        let mlp_out = self.mlp.forward(norm_x.clone());
+        let output = x.add(&mlp_out);
+
+        self.cache = Some(TransformerBlockCache {
+            attn_out: Some(attn_out),
+            x_after_attn: Some(x),
+            norm_x: Some(norm_x),
+            mlp_out: Some(mlp_out),
+            output: Some(output.clone()),
+        });
+
+        output
+    }
+
+    pub fn clear_cache(&mut self) {
+        self.cache = None;
     }
 }
 
@@ -222,6 +249,7 @@ pub struct LmHeadCache {
     pub input: Option<Matrix>,
     pub logits: Option<Matrix>,
     pub probs: Option<Matrix>,
+    pub d_w: Option<Matrix>,
 }
 
 impl LanguageModelHead {
@@ -243,9 +271,23 @@ impl LanguageModelHead {
             input: Some(x.clone()),
             logits: Some(logits.clone()),
             probs: Some(probs.clone()),
+            d_w: None,
         });
 
         probs
+    }
+    pub fn backprop(&mut self, d_logits: &Matrix) -> Matrix {
+        let d_w_lm = self
+            .cache
+            .as_ref()
+            .unwrap()
+            .input
+            .as_ref()
+            .unwrap()
+            .mul_transpose(&d_logits.transpose());
+        let d_x = d_logits.mul_transpose(&self.weights);
+        self.cache.as_mut().unwrap().d_w = Some(d_w_lm);
+        d_x
     }
 
     pub fn clear_cache(&mut self) {
@@ -295,6 +337,12 @@ impl Transformer {
         self.lm_head.forward(&x)
     }
 
+    pub fn backprop(&mut self, d_logits: &Matrix) {
+        //backprop for the language model head
+        let x = self.lm_head.backprop(d_logits);
+        
+    }
+
     pub fn clear_caches(&mut self) {
         self.block.attention.clear_cache();
         self.block.mlp.clear_cache();
@@ -311,10 +359,30 @@ pub fn train_model(data: Vec<u16>) {
     let mut transformer = Transformer::new(config);
 
     // ---- Forward pass ----
-    let _probs = transformer.forward(&data);
+    let probs = transformer.forward(&data);
+    let mut loss = 0.0;
+    for i in 0..data.len() - 1 {
+        let target = data[i + 1] as usize;
+
+        let prob = probs.get_value(i, target).max(1e-9);
+
+        loss += -prob.ln();
+    }
+
+    loss /= (data.len() - 1) as f32;
 
     // Probs now contains softmax probabilities over vocabulary
     // Next step: implement backward pass to compute gradients
+    // backprop start
+    let mut d_logits = probs.clone();
+
+    for i in 0..data.len() - 1 {
+        let target = data[i + 1] as usize;
+
+        d_logits.set_value(i, target, d_logits.get_value(i, target) - 1.0);
+    }
+
+    d_logits /= (data.len() - 1) as f32;
 }
 
 #[cfg(test)]

@@ -1,6 +1,6 @@
 use rand::prelude::*;
 use rayon::prelude::*;
-use std::fmt;
+use std::{fmt, ops::DivAssign};
 
 const EXPO: f32 = 2.71828;
 
@@ -218,6 +218,14 @@ impl Matrix {
     }
 }
 
+impl DivAssign<f32> for Matrix {
+    fn div_assign(&mut self, rhs: f32) {
+        for v in &mut self.data {
+            *v /= rhs;
+        }
+    }
+}
+
 pub fn softmax(m: &Matrix) -> Matrix {
     let mut result = vec![0.0; m.data.len()];
 
@@ -242,6 +250,26 @@ pub fn softmax(m: &Matrix) -> Matrix {
     }
 
     Matrix::with_vector(m.rows, m.cols, result)
+}
+
+pub fn derivate_of_softmax(s: &Matrix) -> Matrix {
+    let mut result = vec![0.0; s.data.len() * s.cols];
+
+    for i in 0..s.rows {
+        let row_start = i * s.cols;
+        let row_end = row_start + s.cols;
+        let row = &s.data[row_start..row_end];
+
+        for j in 0..s.cols {
+            for k in 0..s.cols {
+                let delta = if j == k { 1.0 } else { 0.0 };
+                let jacobian_start = (row_start + j) * s.cols;
+                result[jacobian_start + k] = row[j] * (delta - row[k]);
+            }
+        }
+    }
+
+    Matrix::with_vector(s.rows * s.cols, s.cols, result)
 }
 
 pub fn get_head(q: &Matrix, head: usize, head_dim: usize) -> Matrix {
@@ -297,5 +325,4 @@ impl fmt::Display for Matrix {
 #[cfg(test)]
 mod tests {
     use super::*;
-
 }
