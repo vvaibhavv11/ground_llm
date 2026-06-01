@@ -7,7 +7,7 @@ use rayon::prelude::*;
 
 const MERGES_RECORD_FILE: &str = "merges_record.json";
 const VOCAB_LIST_FILE: &str = "vocab_list.json";
-const MAX_MERGES: usize = 50_000;
+const MAX_MERGES: usize = 7_744;
 
 type Pair = (u16, u16);
 type PairFrequency = (usize, Pair);
@@ -179,7 +179,7 @@ fn save_vocab_list_record(vocab_list: &VocabList) -> std::io::Result<()> {
 #[pyfunction(name = "build_info")]
 pub(crate) fn get_build_info() -> String {
     format!(
-        "ground_llm build: capped_encode_train_max_50000:{}:{}",
+        "ground_llm build: capped_encode_train_max_7744:{}:{}",
         env!("CARGO_PKG_VERSION"),
         file!()
     )

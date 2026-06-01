@@ -21,7 +21,7 @@ impl Default for Config {
         Self {
             dimensions: 512,
             n_heads: 8,
-            vocab_size: 50256,
+            vocab_size: 8000,
             head_dim: 64,
             mlp_hidden: 1380,
         }

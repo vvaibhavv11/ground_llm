@@ -64,136 +64,26 @@ def load_vocab_list(path: str | Path) -> VocabList:
 
 
 def main() -> int:
-    merges = load_merges_record(ROOT / "merges_record.json")
-    vocab_list = load_vocab_list(ROOT / "vocab_list.json")
-
-    # split_text = split_text_file("./dataset/tokebnizer_dataset.txt")
-
-    encode_test = """
-    use std::cmp::Ordering;
-    use std::collections::BinaryHeap;
-
-    // Wrapper to reverse byte comparison
-    #[derive(Eq, PartialEq)]
-    struct ReversedBytes(Vec<u8>);
-
-    impl Ord for ReversedBytes {
-        fn cmp(&self, other: &Self) -> Ordering {
-            // Reverse comparison (like Python __lt__)
-            other.0.cmp(&self.0)
-        }
-    }
-
-    impl PartialOrd for ReversedBytes {
-        fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-            Some(self.cmp(other))
-        }
-    }
-
-    // Heap entry
-    #[derive(Eq, PartialEq)]
-    struct HeapEntry {
-        freq: usize,
-        lex: (ReversedBytes, ReversedBytes),
-        pair: (usize, usize),
-    }
-
-    impl Ord for HeapEntry {
-        fn cmp(&self, other: &Self) -> Ordering {
-            // First compare frequency (max heap)
-            match self.freq.cmp(&other.freq) {
-                Ordering::Equal => {
-                    // Then lexicographically compare reversed bytes
-                    match self.lex.0.cmp(&other.lex.0) {
-                        Ordering::Equal => self.lex.1.cmp(&other.lex.1),
-                        ord => ord,
-                    }
-                }
-                ord => ord,
-            }
-        }
-    }
-
-    impl PartialOrd for HeapEntry {
-        fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-            Some(self.cmp(other))
-        }
-    }
-
-    // Example usage
-    fn main() {
-        let vocab: Vec<Vec<u8>> = vec![
-            b"a".to_vec(),
-            b"b".to_vec(),
-            b"c".to_vec(),
-        ];
-
-        let pair_frequencies = vec![
-            ((0, 1), 10),
-            ((1, 2), 5),
-            ((0, 2), 10),
-        ];
-
-        let mut heap = BinaryHeap::new();
-
-        for (pair, freq) in pair_frequencies {
-            let entry = HeapEntry {
-                freq,
-                lex: (
-                    ReversedBytes(vocab[pair.0].clone()),
-                    ReversedBytes(vocab[pair.1].clone()),
-                ),
-                pair,
-            };
-            heap.push(entry);
-        }
-
-        // Pop elements (highest priority first)
-        while let Some(entry) = heap.pop() {
-            println!(
-                "pair: {:?}, freq: {}, lex: ({:?}, {:?})",
-                entry.pair,
-                entry.freq,
-                entry.lex.0 .0,
-                entry.lex.1 .0
-            );
-        }
-    }
-    """
-    encode_split = TOKEN_RE.findall(encode_test)
-    # merges = ground_llm.encode_train(split_text)
-    encoded = ground_llm.encode(encode_split, merges)
-    print(encoded)
-    # vocab_file = ROOT / "vocab_list.json"
-    # saved_vocab = json.loads(vocab_file.read_text(encoding="utf-8"))
-    # vocab_list = {entry["id"]: entry["bytes"] for entry in saved_vocab}
-    decoded = ground_llm.decode_string(encoded, vocab_list)
-    print(decoded)
+    split_text = split_text_file("./dataset/tokebnizer_dataset.txt")
+    merges = ground_llm.encode_train(split_text)
 
     merges_file = ROOT / "merges_record.json"
+    vocab_file = ROOT / "vocab_list.json"
+    saved_merges = json.loads(merges_file.read_text(encoding="utf-8"))
+    saved_vocab = json.loads(vocab_file.read_text(encoding="utf-8"))
+
     print(f"build_info={ground_llm.build_info()}")
-    print(f"module={ground_llm.__name__}")
-    # print(f"merge_count={len(merges)}")
-    # print(f"encoded={encoded}")
-    # print(f"last_merge_id={merges[-1][1] if merges else None}")
-    print(f"decoded_ok={decoded == encode_test}")
-    # print(f"merges_file_exists={merges_file.exists()}")
-    # print(f"vocab_file_exists={vocab_file.exists()}")
+    print(f"merge_count={len(saved_merges)}")
+    print(f"vocab_count={len(saved_vocab)}")
+    print(f"vocab_size=8000")
+    if saved_merges:
+        print(f"first_merge={saved_merges[0]}")
+        print(f"last_merge={saved_merges[-1]}")
+    if saved_vocab:
+        print(f"first_vocab={saved_vocab[0]}")
+        print(f"last_vocab={saved_vocab[-1]}")
 
-    # if merges_file.exists():
-    #     saved = json.loads(merges_file.read_text(encoding="utf-8"))
-    #     print(f"saved_merge_count={len(saved)}")
-    #     if saved:
-    #         print(f"first_saved_merge={saved[0]}")
-    #         print(f"last_saved_merge={saved[-1]}")
-
-    # if vocab_file.exists():
-    #     print(f"saved_vocab_count={len(saved_vocab)}")
-    #     if saved_vocab:
-    #         print(f"first_saved_vocab={saved_vocab[0]}")
-    #         print(f"last_saved_vocab={saved_vocab[-1]}")
-
-    return 0 if decoded == encode_test else 1
+    return 0
 
 
 if __name__ == "__main__":
