@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
+import time
+from importlib.metadata import version
 from pathlib import Path
 
 import bpe_rs
@@ -36,6 +39,45 @@ def load_tokenizer(merges_path: Path, vocab_path: Path):
         return bpe_rs.decode_string(ids, vocab)
 
     return encode, decode, max(vocab) + 1
+
+
+def iter_pieces(text: str, piece_size: int):
+    """Yield consecutive pieces of ~piece_size chars, each cut right after a
+    newline that is followed by a letter or digit. No pre-tokenizer chunk spans
+    such a cut, so tokenizing piece by piece gives the same ids as all at once."""
+    start, n = 0, len(text)
+    while start < n:
+        end = start + piece_size
+        if end >= n:
+            end = n
+        else:
+            cut = text.find("\n", end)
+            while cut != -1 and not (cut + 1 < n and text[cut + 1].isalnum()):
+                cut = text.find("\n", cut + 1)
+            end = n if cut == -1 else cut + 1
+        yield text[start:end]
+        start = end
+
+
+def tokenize_with_progress(text: str, encode, piece_size: int = 1_000_000) -> list[int]:
+    tokens: list[int] = []
+    total_mb = len(text) / 1e6
+    done = 0
+    started = time.time()
+    for piece in iter_pieces(text, piece_size):
+        tokens.extend(encode(piece))
+        done += len(piece)
+
+        elapsed = time.time() - started
+        rate = done / 1e6 / max(elapsed, 1e-9)
+        eta = (len(text) - done) / 1e6 / max(rate, 1e-9)
+        sys.stdout.write(
+            f"\rtokenizing {100 * done / len(text):5.1f}% | {done / 1e6:.1f}/{total_mb:.1f} MB"
+            f" | {rate:.2f} MB/s | {len(tokens):,} tokens | ETA {eta:.0f}s   "
+        )
+        sys.stdout.flush()
+    sys.stdout.write(f"\rtokenized {total_mb:.1f} MB -> {len(tokens):,} tokens in {time.time() - started:.1f}s" + " " * 30 + "\n")
+    return tokens
 
 
 def main() -> None:
@@ -68,12 +110,14 @@ def main() -> None:
     gen_args.add_argument("--top-k", type=int, default=40)
     args = parser.parse_args()
 
+    print(f"loading tokenizer from {args.merges.name}, {args.vocab.name} ...", flush=True)
     encode, decode, vocab_size = load_tokenizer(args.merges, args.vocab)
+    print(f"bpe_rs {version('bpe_rs')}", flush=True)
 
-    tokens = encode(args.corpus.read_text(encoding="utf-8"))
-    print(f"corpus: {len(tokens):,} tokens")
-
+    # Build the model before the (possibly long) tokenization so a broken
+    # install fails immediately.
     if args.resume:
+        print(f"loading checkpoint {args.checkpoint} ...", flush=True)
         model = ground_llm.Model.load(str(args.checkpoint))
     else:
         model = ground_llm.Model(
@@ -84,7 +128,21 @@ def main() -> None:
             mlp_hidden=args.mlp_hidden,
             max_seq_len=args.max_seq_len,
         )
-    print(model)
+    print(model, flush=True)
+
+    print(f"reading {args.corpus} ...", flush=True)
+    text = args.corpus.read_text(encoding="utf-8")
+    tokens = tokenize_with_progress(text, encode)
+    del text
+
+    seq_len = model.config["max_seq_len"]
+    print(
+        f"training: {args.steps} steps x {args.batch_size} seqs x {seq_len} tokens"
+        f" = {args.steps * args.batch_size * seq_len:,} tokens"
+        f" (~{args.steps * args.batch_size * seq_len / len(tokens):.2f} epochs);"
+        f" checkpoint -> {args.checkpoint}",
+        flush=True,
+    )
 
     try:
         model.train(
