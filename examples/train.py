@@ -102,6 +102,10 @@ def main() -> None:
     train_args.add_argument("--warmup-steps", type=int, default=100)
     train_args.add_argument("--eval-every", type=int, default=100)
     train_args.add_argument("--log-every", type=int, default=10)
+    train_args.add_argument(
+        "--device", choices=["auto", "gpu", "cpu"], default="auto",
+        help="auto = GPU (Metal on macOS, Vulkan on Linux) if available, else CPU",
+    )
 
     gen_args = parser.add_argument_group("sampling")
     gen_args.add_argument("--prompt", default="The")
@@ -154,6 +158,7 @@ def main() -> None:
             eval_every=args.eval_every,
             log_every=args.log_every,
             checkpoint_path=str(args.checkpoint),
+            device=args.device,
         )
     except KeyboardInterrupt:
         print("\ninterrupted; sampling from the current weights")

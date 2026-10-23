@@ -10,7 +10,7 @@ use crate::optim::{AdamW, clip_grad_norm};
 use crate::param::{Param, linear, linear_backward};
 
 const INIT_STD: f32 = 0.02;
-const NORM_EPS: f32 = 1e-5;
+pub(crate) const NORM_EPS: f32 = 1e-5;
 
 // ============================================================================
 // Config
@@ -750,6 +750,15 @@ pub fn cross_entropy(probs: &Matrix, targets: &[u16]) -> (f32, Matrix) {
 // Training
 // ============================================================================
 
+/// Where training runs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Device {
+    #[default]
+    Cpu,
+    /// wgpu: Metal on macOS, Vulkan on Linux.
+    Gpu,
+}
+
 #[derive(Clone, Debug)]
 pub struct TrainConfig {
     pub steps: usize,
@@ -769,6 +778,7 @@ pub struct TrainConfig {
     /// there is no validation split).
     pub checkpoint_path: Option<String>,
     pub seed: u64,
+    pub device: Device,
 }
 
 impl Default for TrainConfig {
@@ -787,6 +797,7 @@ impl Default for TrainConfig {
             eval_batches: 8,
             checkpoint_path: None,
             seed: 0,
+            device: Device::Cpu,
         }
     }
 }
@@ -831,17 +842,64 @@ fn sample_window<'a>(
     (&window[..seq_len], &window[1..])
 }
 
-/// Mean loss over `n_batches` evenly spaced windows (deterministic across calls).
-pub fn evaluate(model: &mut Transformer, tokens: &[u16], seq_len: usize, n_batches: usize) -> f32 {
+/// `n_batches` evenly spaced windows (deterministic across calls).
+fn eval_windows(tokens: &[u16], seq_len: usize, n_batches: usize) -> Vec<(&[u16], &[u16])> {
     let max_start = tokens.len() - (seq_len + 1);
     let n = n_batches.max(1);
-    let mut total = 0.0;
-    for i in 0..n {
-        let start = if n == 1 { 0 } else { max_start * i / (n - 1) };
-        let window = &tokens[start..start + seq_len + 1];
-        total += model.loss(&window[..seq_len], &window[1..]);
+    (0..n)
+        .map(|i| {
+            let start = if n == 1 { 0 } else { max_start * i / (n - 1) };
+            let window = &tokens[start..start + seq_len + 1];
+            (&window[..seq_len], &window[1..])
+        })
+        .collect()
+}
+
+/// The math of a training run: one implementation per `Device`.
+pub(crate) trait Backend {
+    /// One optimizer step on `batch` of (inputs, targets) windows.
+    /// Returns (mean loss, gradient norm before clipping).
+    fn step(&mut self, model: &mut Transformer, batch: &[(&[u16], &[u16])], lr: f32) -> (f32, f32);
+
+    /// Mean loss over `windows` without updating anything.
+    fn loss(&mut self, model: &mut Transformer, windows: &[(&[u16], &[u16])]) -> f32;
+
+    /// Copies the latest weights into `model` (the GPU trains its own copy).
+    fn sync(&mut self, model: &mut Transformer);
+}
+
+struct CpuBackend {
+    optimizer: AdamW,
+    grad_clip: f32,
+}
+
+impl Backend for CpuBackend {
+    fn step(&mut self, model: &mut Transformer, batch: &[(&[u16], &[u16])], lr: f32) -> (f32, f32) {
+        // ---- Forward + backward over the batch (gradient accumulation) ----
+        model.zero_grad();
+        let mut loss_sum = 0.0;
+        for &(inputs, targets) in batch {
+            let probs = model.forward(inputs);
+            let (loss, mut d_logits) = cross_entropy(&probs, targets);
+            d_logits /= batch.len() as f32;
+            model.backward(&d_logits);
+            loss_sum += loss;
+        }
+        let loss = loss_sum / batch.len() as f32;
+
+        // ---- Optimizer step ----
+        let mut params = model.params_mut();
+        let grad_norm = clip_grad_norm(&mut params, self.grad_clip);
+        self.optimizer.step(&mut params, lr);
+        (loss, grad_norm)
     }
-    total / n as f32
+
+    fn loss(&mut self, model: &mut Transformer, windows: &[(&[u16], &[u16])]) -> f32 {
+        let total: f32 = windows.iter().map(|&(i, t)| model.loss(i, t)).sum();
+        total / windows.len() as f32
+    }
+
+    fn sync(&mut self, _model: &mut Transformer) {}
 }
 
 /// Trains `model` on a stream of token ids.
@@ -890,8 +948,26 @@ pub fn train(
         ));
     }
 
+    let mut backend: Box<dyn Backend> = match cfg.device {
+        Device::Cpu => Box::new(CpuBackend {
+            optimizer: AdamW::new(cfg.weight_decay),
+            grad_clip: cfg.grad_clip,
+        }),
+        Device::Gpu => Box::new(crate::gpu::GpuTrainer::new(
+            model,
+            cfg.batch_size,
+            cfg.seq_len,
+            cfg.weight_decay,
+            cfg.grad_clip,
+        )?),
+    };
+    let val_windows = if has_val {
+        eval_windows(val_tokens, cfg.seq_len, cfg.eval_batches)
+    } else {
+        Vec::new()
+    };
+
     let mut rng = StdRng::seed_from_u64(cfg.seed);
-    let mut optimizer = AdamW::new(cfg.weight_decay);
     let mut history = TrainHistory::default();
     let mut best_val = f32::INFINITY;
 
@@ -899,23 +975,10 @@ pub fn train(
         let started = Instant::now();
         let lr = cfg.lr_at(step);
 
-        // ---- Forward + backward over the batch (gradient accumulation) ----
-        model.zero_grad();
-        let mut loss_sum = 0.0;
-        for _ in 0..cfg.batch_size {
-            let (inputs, targets) = sample_window(train_tokens, cfg.seq_len, &mut rng);
-            let probs = model.forward(inputs);
-            let (loss, mut d_logits) = cross_entropy(&probs, targets);
-            d_logits /= cfg.batch_size as f32;
-            model.backward(&d_logits);
-            loss_sum += loss;
-        }
-        let loss = loss_sum / cfg.batch_size as f32;
-
-        // ---- Optimizer step ----
-        let mut params = model.params_mut();
-        let grad_norm = clip_grad_norm(&mut params, cfg.grad_clip);
-        optimizer.step(&mut params, lr);
+        let batch: Vec<(&[u16], &[u16])> = (0..cfg.batch_size)
+            .map(|_| sample_window(train_tokens, cfg.seq_len, &mut rng))
+            .collect();
+        let (loss, grad_norm) = backend.step(model, &batch, lr);
 
         let elapsed = started.elapsed().as_secs_f32();
         history.train_loss.push(loss);
@@ -923,11 +986,12 @@ pub fn train(
         // ---- Validation + checkpointing ----
         let is_eval_step = cfg.eval_every > 0 && (step % cfg.eval_every == 0 || step == cfg.steps);
         let val_loss = if has_val && is_eval_step {
-            let val = evaluate(model, val_tokens, cfg.seq_len, cfg.eval_batches);
+            let val = backend.loss(model, &val_windows);
             history.val_loss.push((step, val));
             if val < best_val {
                 best_val = val;
                 if let Some(path) = &cfg.checkpoint_path {
+                    backend.sync(model);
                     model
                         .save(path)
                         .map_err(|e| format!("failed to save checkpoint: {}", e))?;
@@ -951,6 +1015,7 @@ pub fn train(
         }
     }
 
+    backend.sync(model);
     if !has_val {
         if let Some(path) = &cfg.checkpoint_path {
             model

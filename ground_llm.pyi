@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional, Tuple, TypedDict
+from typing import Dict, List, Literal, Optional, Tuple, TypedDict
 
 class TrainHistory(TypedDict):
     train_loss: List[float]
@@ -31,6 +31,7 @@ class Model:
         log_every: int = 10,
         checkpoint_path: Optional[str] = None,
         seed: int = 0,
+        device: Literal["cpu", "gpu", "auto"] = "cpu",
     ) -> TrainHistory: ...
     def loss(self, tokens: List[int]) -> float: ...
     def generate(

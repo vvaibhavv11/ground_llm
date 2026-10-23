@@ -1,14 +1,15 @@
-use pyo3::exceptions::{PyIOError, PyValueError};
+use pyo3::exceptions::{PyIOError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
+mod gpu;
 mod matrix;
 mod mlp;
 mod optim;
 mod param;
 mod train;
 
-use train::{Config, TrainConfig, Transformer};
+use train::{Config, Device, TrainConfig, Transformer};
 
 /// Python handle to a Transformer language model.
 #[pyclass(name = "Model")]
@@ -46,6 +47,9 @@ impl Model {
     /// Train on a flat list of token ids. Logs progress every `log_every` steps.
     /// Ctrl-C stops training and raises KeyboardInterrupt; the model keeps the
     /// weights learned so far.
+    ///
+    /// `device` is "cpu", "gpu" (Metal on macOS, Vulkan on Linux) or "auto"
+    /// (the GPU if there is one, else the CPU).
     #[pyo3(signature = (
         tokens,
         steps=1000,
@@ -62,6 +66,7 @@ impl Model {
         log_every=10,
         checkpoint_path=None,
         seed=0,
+        device="cpu",
     ))]
     #[allow(clippy::too_many_arguments)]
     fn train<'py>(
@@ -82,7 +87,33 @@ impl Model {
         log_every: usize,
         checkpoint_path: Option<String>,
         seed: u64,
+        device: &str,
     ) -> PyResult<Bound<'py, PyDict>> {
+        let device = match device {
+            "cpu" => Device::Cpu,
+            "gpu" => {
+                let name = gpu::probe().map_err(PyRuntimeError::new_err)?;
+                py_print(py, &format!("training on GPU: {}", name))?;
+                Device::Gpu
+            }
+            "auto" => match gpu::probe() {
+                Ok(name) => {
+                    py_print(py, &format!("training on GPU: {}", name))?;
+                    Device::Gpu
+                }
+                Err(reason) => {
+                    py_print(py, &format!("training on CPU: {}", reason))?;
+                    Device::Cpu
+                }
+            },
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "device must be \"cpu\", \"gpu\" or \"auto\", got {:?}",
+                    other
+                )));
+            }
+        };
+
         let cfg = TrainConfig {
             steps,
             batch_size,
@@ -97,6 +128,7 @@ impl Model {
             eval_batches,
             checkpoint_path,
             seed,
+            device,
         };
 
         let model = &mut self.inner;
