@@ -32,6 +32,14 @@ impl Matrix {
         }
     }
 
+    /// Uniform init with the given standard deviation (U(-a, a) has std a / sqrt(3)).
+    pub fn init(rows: usize, cols: usize, std: f32) -> Matrix {
+        let a = std * 3f32.sqrt();
+        let mut rng = rand::rng();
+        let values: Vec<f32> = (0..rows * cols).map(|_| rng.random_range(-a..a)).collect();
+        Matrix::with_vector(rows, cols, values)
+    }
+
     pub fn with_vector(rows: usize, cols: usize, vector: Vec<f32>) -> Matrix {
         if rows * cols != vector.len() {
             panic!("wrong vector")
@@ -99,6 +107,13 @@ impl Matrix {
         Matrix::with_vector(self.rows, self.cols, data)
     }
 
+    pub fn add_assign(&mut self, m: &Matrix) {
+        assert!(self.rows == m.rows && self.cols == m.cols);
+        for (a, b) in self.data.iter_mut().zip(m.data.iter()) {
+            *a += *b;
+        }
+    }
+
     pub fn scale(&self, scalar: f32) -> Matrix {
         let data = self.data.iter().map(|x| x * scalar).collect();
         Matrix::with_vector(self.rows, self.cols, data)
@@ -134,18 +149,23 @@ impl Matrix {
 
     pub fn mul_transpose(&self, b_transpose: &Matrix) -> Matrix {
         assert!(self.cols == b_transpose.cols);
-        let mut data = vec![0.0; self.rows * b_transpose.rows];
-        for i in 0..self.rows {
-            for j in 0..b_transpose.rows {
-                let mut sum: f32 = 0.0;
-                for k in 0..self.cols {
-                    sum +=
-                        self.data[i * self.cols + k] * b_transpose.data[j * b_transpose.cols + k];
+        let n = b_transpose.rows;
+        let k_len = self.cols;
+        let mut data = vec![0.0; self.rows * n];
+        data.par_chunks_mut(n.max(1))
+            .enumerate()
+            .for_each(|(i, out_row)| {
+                let a_row = &self.data[i * k_len..(i + 1) * k_len];
+                for (j, out) in out_row.iter_mut().enumerate() {
+                    let b_row = &b_transpose.data[j * k_len..(j + 1) * k_len];
+                    let mut sum: f32 = 0.0;
+                    for k in 0..k_len {
+                        sum += a_row[k] * b_row[k];
+                    }
+                    *out = sum;
                 }
-                data[i * b_transpose.rows + j] = sum;
-            }
-        }
-        return Matrix::with_vector(self.rows, b_transpose.rows, data);
+            });
+        return Matrix::with_vector(self.rows, n, data);
     }
 
     pub fn causal_mask(&mut self) {
@@ -163,10 +183,11 @@ impl Matrix {
         }
     }
 
+    /// d/dx SiLU(x) = sigmoid(x) * (1 + x * (1 - sigmoid(x)))
     pub fn swish_derivation(&mut self) {
         for x in &mut self.data {
-            let e = (-*x).exp();
-            *x = *x / (1.0 + e);
+            let sig = 1.0 / (1.0 + (-*x).exp());
+            *x = sig * (1.0 + *x * (1.0 - sig));
         }
     }
 
@@ -193,6 +214,15 @@ impl Matrix {
     }
 
     pub fn rope(&mut self) {
+        self.rotate_pairs(1.0);
+    }
+
+    /// RoPE is a per-position rotation, so its gradient is the inverse rotation.
+    pub fn rope_backward(&mut self) {
+        self.rotate_pairs(-1.0);
+    }
+
+    fn rotate_pairs(&mut self, direction: f32) {
         let dim = self.cols as f32;
 
         for pos in 0..self.rows {
@@ -205,7 +235,7 @@ impl Matrix {
                 let x = self.data[idx];
                 let y = self.data[idx + 1];
 
-                let theta = (pos as f32) / 10000_f32.powf((i as f32) / dim);
+                let theta = direction * (pos as f32) / 10000_f32.powf((i as f32) / dim);
                 let cos = theta.cos();
                 let sin = theta.sin();
 
@@ -272,6 +302,40 @@ pub fn derivate_of_softmax(s: &Matrix) -> Matrix {
     Matrix::with_vector(s.rows * s.cols, s.cols, result)
 }
 
+/// Backward of row-wise softmax without building the Jacobian:
+/// dS = P * (dP - rowsum(dP * P))
+pub fn softmax_backward(p: &Matrix, dp: &Matrix) -> Matrix {
+    assert!(p.rows == dp.rows && p.cols == dp.cols);
+    let mut ds = vec![0.0; p.data.len()];
+
+    for i in 0..p.rows {
+        let start = i * p.cols;
+        let end = start + p.cols;
+        let p_row = &p.data[start..end];
+        let dp_row = &dp.data[start..end];
+
+        let dot: f32 = p_row.iter().zip(dp_row).map(|(a, b)| a * b).sum();
+        for j in 0..p.cols {
+            ds[start + j] = p_row[j] * (dp_row[j] - dot);
+        }
+    }
+
+    Matrix::with_vector(p.rows, p.cols, ds)
+}
+
+/// Inverse of `split_qkv`: [rows, d] x 3 -> [rows, 3d]
+pub fn merge_qkv(q: &Matrix, k: &Matrix, v: &Matrix) -> Matrix {
+    let d = q.cols;
+    let mut data = Vec::with_capacity(q.rows * d * 3);
+    for i in 0..q.rows {
+        let row = i * d..(i + 1) * d;
+        data.extend_from_slice(&q.data[row.clone()]);
+        data.extend_from_slice(&k.data[row.clone()]);
+        data.extend_from_slice(&v.data[row]);
+    }
+    Matrix::with_vector(q.rows, d * 3, data)
+}
+
 pub fn get_head(q: &Matrix, head: usize, head_dim: usize) -> Matrix {
     let mut data = Vec::with_capacity(q.rows * head_dim);
 
@@ -325,4 +389,50 @@ impl fmt::Display for Matrix {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_mul_transpose_matches_mul() {
+        let a = Matrix::random(5, 7);
+        let b = Matrix::random(7, 3);
+        let expected = a.mul(&b);
+        let got = a.mul_transpose(&b.transpose());
+        assert_eq!((got.rows, got.cols), (5, 3));
+        for (x, y) in got.data.iter().zip(&expected.data) {
+            assert!((x - y).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn test_rope_backward_inverts_rope() {
+        let original = Matrix::random(6, 8);
+        let mut m = original.clone();
+        m.rope();
+        m.rope_backward();
+        for (x, y) in m.data.iter().zip(&original.data) {
+            assert!((x - y).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn test_merge_qkv_inverts_split() {
+        let qkv = Matrix::random(4, 12);
+        let (q, k, v) = qkv.split_qkv();
+        assert_eq!(merge_qkv(&q, &k, &v).data, qkv.data);
+    }
+
+    #[test]
+    fn test_swish_derivation() {
+        let x = Matrix::with_vector(1, 3, vec![-2.0, 0.0, 1.5]);
+        let mut d = x.clone();
+        d.swish_derivation();
+        let eps = 1e-3;
+        for i in 0..3 {
+            let mut plus = Matrix::with_vector(1, 1, vec![x.data[i] + eps]);
+            let mut minus = Matrix::with_vector(1, 1, vec![x.data[i] - eps]);
+            plus.swish();
+            minus.swish();
+            let numeric = (plus.data[0] - minus.data[0]) / (2.0 * eps);
+            assert!((d.data[i] - numeric).abs() < 1e-3);
+        }
+    }
 }

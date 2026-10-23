@@ -14,14 +14,15 @@ The project will be developed in the following phases:
   - BPE algorithm implementation.
   - Rust-based performance optimization.
   - Vocab and Merge rule persistence.
-- [ ] **Phase 2: Model Architecture**
-  - Implementation of the Transformer architecture.
-  - Embedding layers, Multi-Head Attention, and Feed-Forward Networks.
-  - Positional encoding.
-- [ ] **Phase 3: Training Framework**
-  - Data loading and batching pipelines.
-  - Loss functions and optimizer implementation.
-  - Training loop with checkpointing.
+- [x] **Phase 2: Model Architecture**
+  - Pre-norm decoder-only Transformer with a configurable number of layers.
+  - Embedding layers, causal Multi-Head Attention, and Gated SiLU Feed-Forward Networks.
+  - RMSNorm with learnable gain, rotary positional encoding (RoPE).
+- [x] **Phase 3: Training Framework**
+  - Full backpropagation for every layer, verified by a finite-difference gradient check.
+  - Random-window batching with a train/validation split.
+  - Cross-entropy loss, AdamW, gradient clipping, warmup + cosine LR schedule.
+  - Training loop with best-validation checkpointing.
 - [ ] **Phase 4: Inference & Evaluation**
   - Generation strategies (Greedy, Beam Search, Top-K/Top-P).
   - Benchmarking and evaluation metrics.
@@ -48,11 +49,34 @@ The tokenizer is now a separate package: [`bpe_rs`](../bpe_rs). Install it along
 pip install bpe_rs
 ```
 
+### Training
+
+```python
+import ground_llm
+
+model = ground_llm.Model(vocab_size=8000, dimensions=256, n_heads=4, n_layers=4, max_seq_len=128)
+history = model.train(tokens, steps=2000, batch_size=8, lr=1e-3, checkpoint_path="checkpoint.bin")
+ids = model.generate(prompt_tokens, max_new_tokens=100, temperature=0.8, top_k=40)
+
+model = ground_llm.Model.load("checkpoint.bin")
+```
+
+`tokens` is a flat list of token ids. `examples/train.py` does the whole thing end to end, tokenizing a text file with `bpe_rs`:
+
+```bash
+python examples/train.py corpus.txt --steps 2000
+```
+
+Ctrl-C during `train` stops after the current step; the model keeps the weights learned so far.
+
 ## Project Structure
 
 - `src/lib.rs`: Python module definition and function exports.
 - `src/matrix.rs`: Matrix operations (matmul, RMSNorm, RoPE, softmax, etc.).
 - `src/mlp.rs`: Gated SiLU feed-forward network.
-- `src/train.rs`: Transformer model architecture and training.
+- `src/param.rs`: Trainable parameters and linear-layer forward/backward helpers.
+- `src/optim.rs`: AdamW optimizer and gradient clipping.
+- `src/train.rs`: Transformer model, backprop, loss, training loop, checkpointing, and generation.
+- `examples/train.py`: End-to-end training script using `bpe_rs` for tokenization.
 - `Cargo.toml`: Rust dependencies.
 - `pyproject.toml`: Python project configuration.

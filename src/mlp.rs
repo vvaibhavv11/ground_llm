@@ -1,4 +1,5 @@
 use crate::matrix::Matrix;
+use crate::param::{Param, linear, linear_backward};
 
 // ============================================================================
 // MLP / FFN (Gated SiLU)
@@ -8,31 +9,32 @@ use crate::matrix::Matrix;
 pub struct Mlp {
     pub n_hidden: usize,
     pub n_input: usize,
-    pub w1: Matrix, // [n_input, n_hidden]
-    pub w2: Matrix, // [n_input, n_hidden]  (gate projection)
-    pub w3: Matrix, // [n_hidden, n_input]  (output projection)
+    pub w1: Param, // [n_input, n_hidden]
+    pub w2: Param, // [n_input, n_hidden]  (gate projection)
+    pub w3: Param, // [n_hidden, n_input]  (output projection)
 
     // Cache for backward
     pub cache: Option<MlpCache>,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct MlpCache {
-    pub input: Option<Matrix>,
-    pub h1: Option<Matrix>,
-    pub h2: Option<Matrix>,
-    pub h_gated: Option<Matrix>,
-    pub output: Option<Matrix>,
+    pub input: Matrix,
+    pub h1: Matrix,
+    pub h2: Matrix,
+    pub h_gated: Matrix,
 }
 
 impl Mlp {
-    pub fn new(n_input: usize, n_hidden: usize) -> Self {
+    /// `std` initialises the input projections, `out_std` the output projection
+    /// (scaled down so the residual stream doesn't grow with depth).
+    pub fn new(n_input: usize, n_hidden: usize, std: f32, out_std: f32) -> Self {
         Self {
             n_hidden,
             n_input,
-            w1: Matrix::random(n_input, n_hidden),
-            w2: Matrix::random(n_input, n_hidden),
-            w3: Matrix::random(n_hidden, n_input),
+            w1: Param::new(Matrix::init(n_input, n_hidden, std), true),
+            w2: Param::new(Matrix::init(n_input, n_hidden, std), true),
+            w3: Param::new(Matrix::init(n_hidden, n_input, out_std), true),
             cache: None,
         }
     }
@@ -46,8 +48,8 @@ impl Mlp {
     /// Output: [seq_len, n_input]
     pub fn forward(&mut self, input: Matrix) -> Matrix {
         // Project to hidden: [seq_len, n_hidden]
-        let h1 = input.mul_transpose(&self.w1.transpose());
-        let h2 = input.mul_transpose(&self.w2.transpose());
+        let h1 = linear(&input, &self.w1);
+        let h2 = linear(&input, &self.w2);
 
         // Gated activation: SiLU(h1) * h2
         let mut h_gated = h1.clone();
@@ -55,17 +57,43 @@ impl Mlp {
         h_gated.elem_mul(&h2);
 
         // Output projection: [seq_len, n_input]
-        let output = h_gated.mul_transpose(&self.w3.transpose());
+        let output = linear(&h_gated, &self.w3);
 
         self.cache = Some(MlpCache {
-            input: Some(input),
-            h1: Some(h1),
-            h2: Some(h2),
-            h_gated: Some(h_gated),
-            output: Some(output.clone()),
+            input,
+            h1,
+            h2,
+            h_gated,
         });
 
         output
+    }
+
+    /// Backward pass. Accumulates weight gradients and returns d_input.
+    /// Input: d_out [seq_len, n_input]
+    pub fn backward(&mut self, d_out: &Matrix) -> Matrix {
+        let cache = self
+            .cache
+            .take()
+            .expect("Mlp::backward called before forward");
+
+        // output = h_gated @ W3
+        let d_gated = linear_backward(&cache.h_gated, &mut self.w3, d_out);
+
+        // h_gated = SiLU(h1) * h2
+        let mut d_h1 = cache.h1.clone();
+        d_h1.swish_derivation();
+        d_h1.elem_mul(&cache.h2);
+        d_h1.elem_mul(&d_gated);
+
+        let mut d_h2 = cache.h1;
+        d_h2.swish();
+        d_h2.elem_mul(&d_gated);
+
+        // h1 = x @ W1, h2 = x @ W2
+        let mut d_input = linear_backward(&cache.input, &mut self.w1, &d_h1);
+        d_input.add_assign(&linear_backward(&cache.input, &mut self.w2, &d_h2));
+        d_input
     }
 
     pub fn clear_cache(&mut self) {
